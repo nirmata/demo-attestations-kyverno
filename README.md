@@ -62,17 +62,16 @@ Requires **Kyverno v1.17+** and ImageValidatingPolicy support.
 
 Policies (provenance + SBOM) are in **`sample-policies/`**:
 
-- `ivpol-gh-att.yaml` — verify SLSA provenance attestation
-- `ivpol-sbom.yaml` — verify SPDX SBOM attestation
+- `verify-github-provenance.yaml` — verify SLSA provenance attestation
+- `verify-github-sbom.yaml` — verify SPDX SBOM attestation
 
 **Deploy:**
 
 ```bash
-kubectl apply -f sample-policies/ivpol-gh-att.yaml
-kubectl apply -f sample-policies/ivpol-sbom.yaml
+kubectl apply -f sample-policies/verify-github-provenance.yaml
+kubectl apply -f sample-policies/verify-github-sbom.yaml
 ```
 
-Before applying, replace `dolisss` in both files (glob and subject) with your GitHub org/username if different.
 
 **Test:**
 
