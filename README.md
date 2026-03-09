@@ -1,5 +1,6 @@
 # Demo: GitHub attestations + SBOM with Kyverno
 
+
 This repo demonstrates **supply-chain controls** using GitHub Artifact Attestations (provenance + SBOM) and **Kyverno ImageValidatingPolicy** for cluster enforcement.
 
 - **Pipeline:** GitHub Actions builds images and attaches SLSA provenance and SPDX SBOM attestations  (Uses the [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations#generating-build-provenance-for-container-images) flow)
