@@ -88,3 +88,4 @@ If the pod is admitted, provenance verification passed. (SBOM is attested on the
 
 - [GitHub: Generating build provenance for container images](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations#generating-build-provenance-for-container-images)
 - [Kyverno: ImageValidatingPolicy](https://kyverno.io/docs/policy-types/image-validating-policy/)
+- https://nirmata.com/2026/03/16/supply-chain-security-with-github-artifact-attestations-and-kyverno/
