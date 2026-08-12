@@ -14,6 +14,14 @@ metadata:
     policies.kyverno.io/description: >-
       Verifies the Trivy vulnerability-scan attestation and denies the image if
       the scan reported any CRITICAL severity vulnerability.
+
+      Caveat for anyone reading this as a worked example: Trivy finds nothing in
+      the demo image, so its report has no top-level `Results` key at all and
+      the CRITICAL check passes on the absent-key guard rather than on scanned
+      content. The guard is necessary — a missing key is an evaluation error,
+      which under failurePolicy: Fail denies the image and looks like a real
+      finding — but it means this policy has only been exercised against a clean
+      report. Point it at an image with known CRITICALs before trusting it.
 spec:
   validationActions: [Deny]
   failurePolicy: Fail
@@ -51,21 +59,26 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
-    - expression: >-
-        images.containers.map(image, verifyAttestationSignatures(image, attestations.vulnScan, [attestors.github])).all(e, e > 0)
-      message: "Failed to verify vulnerability-scan attestation"
-
-    # ── Payload check: content, not just signature ──────────────────────────
-    # Trivy's report is the predicate. `Results` may be absent when nothing was
-    # scanned, and a result may carry no `Vulnerabilities` array, so guard both
-    # — otherwise a missing key raises an evaluation error, which under
-    # failurePolicy: Fail denies the image and looks like a real finding.
+  # ONE validation, ONE verify call — this is not stylistic.
+  #
+  # `extractPayload` can only read an attestation verified *in the same CEL
+  # expression*; verification state does not carry across validations. And
+  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
+  # default) makes a repeat `verifyAttestationSignatures` for the same image a
+  # cache hit that returns the count WITHOUT repopulating the payload store, so
+  # a second call in a second validation yields
+  #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
+  # which under failurePolicy: Fail denies the image.
+  #
+  # So: verify once, then chain every payload assertion off that one call with
+  # `&&`. The cost is a single combined message per policy.
     - expression: >-
         images.containers.map(image,
-          !has(extractPayload(image, attestations.vulnScan).predicate.Results) ||
-          extractPayload(image, attestations.vulnScan).predicate.Results.all(r,
-            !has(r.Vulnerabilities) ||
-            size(r.Vulnerabilities) == 0 ||
-            r.Vulnerabilities.all(v, v.Severity != "CRITICAL"))
+          verifyAttestationSignatures(image, attestations.vulnScan, [attestors.github]) > 0 &&
+          (!has(extractPayload(image, attestations.vulnScan).predicate.Results) ||
+           extractPayload(image, attestations.vulnScan).predicate.Results.all(r,
+             !has(r.Vulnerabilities) ||
+             r.Vulnerabilities.all(v, v.Severity != "CRITICAL")))
         ).all(e, e)
-      message: "Image has CRITICAL severity vulnerabilities in its scan attestation"
+      message: >-
+        Vulnerability-scan check failed: signature must verify and the Trivy report must contain no CRITICAL findings

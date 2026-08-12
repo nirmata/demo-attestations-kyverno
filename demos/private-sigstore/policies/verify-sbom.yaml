@@ -46,6 +46,22 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
+  # ONE validation, ONE verify call — this is not stylistic.
+  #
+  # `extractPayload` can only read an attestation verified *in the same CEL
+  # expression*; verification state does not carry across validations. And
+  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
+  # default) makes a repeat `verifyAttestationSignatures` for the same image a
+  # cache hit that returns the count WITHOUT repopulating the payload store, so
+  # a second call in a second validation yields
+  #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
+  # which under failurePolicy: Fail denies the image.
+  #
+  # So: verify once, then chain every payload assertion off that one call with
+  # `&&`. The cost is a single combined message per policy.
     - expression: >-
-        images.containers.map(image, verifyAttestationSignatures(image, attestations.sbom, [attestors.github])).all(e, e > 0)
-      message: "Failed to verify SPDX SBOM attestation against GitHub's private Sigstore instance"
+        images.containers.map(image,
+          verifyAttestationSignatures(image, attestations.sbom, [attestors.github]) > 0
+        ).all(e, e)
+      message: >-
+        Failed to verify SPDX SBOM attestation against GitHub's private Sigstore instance

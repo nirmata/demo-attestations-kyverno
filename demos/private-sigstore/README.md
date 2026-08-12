@@ -138,8 +138,14 @@ If the CA check were being skipped, that would have passed.
 demos/private-sigstore/
 ├── Dockerfile
 ├── policies/
-│   ├── kyverno-rbac.yaml                        lets Kyverno read the ConfigMap
-│   └── verify-github-attestations-private.yaml  provenance + SBOM + caller pinning
+│   ├── kyverno-rbac.yaml            lets Kyverno read the ConfigMap
+│   ├── verify-provenance.yaml       SLSA provenance + caller pinning
+│   ├── verify-sbom.yaml             SPDX SBOM
+│   ├── verify-vuln-scan.yaml        Trivy scan — signature AND payload content
+│   ├── verify-build-metadata.yaml   fully custom predicate
+│   └── verify-code-review.yaml      real approval count, 2+ required
+├── exceptions/
+│   └── skip-code-review.yaml        waives ONE policy, keeps the other four
 ├── resources/private-pod.yaml
 ├── scripts/
 │   ├── fetch-trusted-root.sh                    trusted root → ConfigMap
@@ -149,7 +155,21 @@ demos/private-sigstore/
 
 In production the reusable workflow belongs in its own repo (e.g.
 `nirmata/shared-workflows`) so it versions independently. It lives here to keep
-the demo in one piece — **if you move it, update `subjectRegExp` in the policy.**
+the demo in one piece — **if you move it, update `subjectRegExp` in every policy.**
+
+### Why five policies and not one
+
+A Kyverno `PolicyException` is all-or-nothing at the **policy** level for an
+`ImageValidatingPolicy`: the IVP evaluator returns early the moment an exception
+matches, and the IVP CEL environment exposes no `exceptions` variable (the
+`exceptions.allowedValues` escape hatch exists only for Validating, Mutating and
+Generating policies). You therefore cannot waive one validation inside a policy.
+
+**Exception granularity equals policy granularity.** One attestation per policy
+is what makes `exceptions/skip-code-review.yaml` able to waive the code-review
+requirement while provenance, SBOM, vulnerability scan and build metadata stay
+enforced. The public-Sigstore demo keeps a single combined policy on purpose —
+it is the simpler on-ramp and has no exception to demonstrate.
 
 ## Walkthrough
 
@@ -266,8 +286,74 @@ Values are already `nirmata`, so these run as-is:
 
 ```bash
 kubectl apply -f policies/kyverno-rbac.yaml
-kubectl apply -f policies/verify-github-attestations-private.yaml
+kubectl apply -f policies/            # all five ImageValidatingPolicies
+kubectl apply -f resources/private-pod.yaml
+```
+
+With all five enforced the pod is **denied**, and that is the intended result:
+the demo image is built by a direct push to `main`, the code-review attestation
+records the true approval count (zero), and `verify-code-review` requires two.
+
+```
+Image requires at least 2 approving code reviews
+```
+
+Waive that one policy and re-apply:
+
+```bash
+kubectl apply -f exceptions/skip-code-review.yaml
 kubectl apply -f resources/private-pod.yaml    # admitted
+```
+
+### Two Kyverno flags this demo needs
+
+**1. PolicyExceptions must be switched on.** The chart ships them off, and
+`--enablePolicyException=true` alone is not enough — without a namespace the
+controller logs `the flag --exceptionNamespace cannot be empty` at startup and
+exceptions are silently never loaded:
+
+```bash
+helm upgrade kyverno kyverno/kyverno -n kyverno --reuse-values \
+  --set features.policyExceptions.enabled=true \
+  --set features.policyExceptions.namespace=kyverno
+```
+
+**2. The image-verification cache must be off** — `--imageVerifyCacheEnabled=false`.
+
+This is a real bug in the Kyverno `main` build used here, not a preference. The
+cache is keyed by image, so a repeat `verifyAttestationSignatures` for an image
+already verified in this process returns the cached count **without
+repopulating the attestation payload store**. Every `extractPayload` after that
+first verification then fails:
+
+```
+Policy verify-build-metadata error: failed to evaluate policy: failed to get
+payload: intoto attestation payload cannot be fetch before verifying intoto
+attestation
+```
+
+It is reproducible and order-dependent: with the cache on, the first admission
+after a controller restart passes and every later one fails, naming whichever
+policy happened to evaluate second. Because `failurePolicy: Fail` turns an
+evaluation error into a denial, this looks exactly like a real policy violation.
+
+```bash
+kubectl -n kyverno set args deploy/kyverno-admission-controller \
+  --imageVerifyCacheEnabled=false   # illustrative; use the chart value
+```
+
+Signature-only policies (`verify-sbom`) are unaffected — this only bites
+policies that read a payload.
+
+### `polex` does not mean what you think
+
+`kubectl get polex` resolves to the **legacy `kyverno.io/v2`** PolicyException.
+The exception here is `policies.kyverno.io/v1`, so the short name silently lists
+and deletes the wrong resource — `kubectl delete polex …` reports success while
+leaving the exception in force. Always spell out the group:
+
+```bash
+kubectl get policyexceptions.policies.kyverno.io -A
 ```
 
 Negative test — an image with no attestations:
@@ -278,20 +364,26 @@ kubectl run should-fail \
   --restart=Never --overrides='{"spec":{"imagePullSecrets":[{"name":"ghcr-pull-secret"}]}}'
 ```
 
-Negative test for the **caller pinning** specifically — this is the one worth
-running, because it proves those validations actually evaluate rather than
-passing vacuously:
+Negative tests for the **payload** checks — these are the ones worth running,
+because they prove the validations actually evaluate rather than passing
+vacuously. Flip an expected value and the image must be denied:
 
 ```bash
-sed 's|== "7470644"|== "99999999"|; s|name: verify-private-github-attestations|name: neg-wrong-owner|' \
-  policies/verify-github-attestations-private.yaml | kubectl apply -f -
-kubectl delete ivpol verify-private-github-attestations
-sleep 10
-kubectl apply -f resources/private-pod.yaml
-# → denied: "Provenance was not produced by a repository owned by the nirmata org"
-kubectl delete ivpol neg-wrong-owner
-kubectl apply -f policies/verify-github-attestations-private.yaml
+sed 's|"7470644"|"99999999"|' policies/verify-provenance.yaml | kubectl apply -f -
+sleep 30 && kubectl delete pod private-attestation-demo --ignore-not-found
+kubectl apply -f resources/private-pod.yaml     # → denied
+kubectl apply -f policies/verify-provenance.yaml
+
+sed 's|builder == "github-hosted"|builder == "self-hosted-nope"|' \
+  policies/verify-build-metadata.yaml | kubectl apply -f -
+sleep 30 && kubectl delete pod private-attestation-demo --ignore-not-found
+kubectl apply -f resources/private-pod.yaml     # → denied
+kubectl apply -f policies/verify-build-metadata.yaml
 ```
+
+Give webhook re-registration ~30s after any policy change. Test too soon and
+the pod is admitted because the webhook is not registered yet — which reads
+exactly like a policy that passed.
 
 ### 5. Onboard a second repo (the actual payoff)
 

@@ -52,12 +52,23 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
-    - expression: >-
-        images.containers.map(image, verifyAttestationSignatures(image, attestations.codeReview, [attestors.github])).all(e, e > 0)
-      message: "Failed to verify code-review attestation"
-
+  # ONE validation, ONE verify call — this is not stylistic.
+  #
+  # `extractPayload` can only read an attestation verified *in the same CEL
+  # expression*; verification state does not carry across validations. And
+  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
+  # default) makes a repeat `verifyAttestationSignatures` for the same image a
+  # cache hit that returns the count WITHOUT repopulating the payload store, so
+  # a second call in a second validation yields
+  #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
+  # which under failurePolicy: Fail denies the image.
+  #
+  # So: verify once, then chain every payload assertion off that one call with
+  # `&&`. The cost is a single combined message per policy.
     - expression: >-
         images.containers.map(image,
+          verifyAttestationSignatures(image, attestations.codeReview, [attestors.github]) > 0 &&
           extractPayload(image, attestations.codeReview).predicate.approvals >= 2
         ).all(e, e)
-      message: "Image requires at least 2 approving code reviews"
+      message: >-
+        Code-review check failed: signature must verify and the pull request must have at least 2 approving reviews

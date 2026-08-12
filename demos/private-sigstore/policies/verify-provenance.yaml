@@ -54,31 +54,25 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
-    # Signature first — extractPayload only returns an already-verified payload.
-    - expression: >-
-        images.containers.map(image, verifyAttestationSignatures(image, attestations.slsa, [attestors.github])).all(e, e > 0)
-      message: "Failed to verify SLSA provenance attestation against GitHub's private Sigstore instance"
-
-    # ── Close the "reusable identity" hole ──────────────────────────────────
-    # The attestor proves the CENTRAL workflow signed this image, not which repo
-    # invoked it. Anyone able to call the reusable workflow inherits the
-    # identity, so pin the caller from the verified predicate.
-    # repository_owner_id is immutable (nirmata = 7470644); the org name is not.
-    - expression: >-
-        images.containers.map(image,
-          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644"
-        ).all(e, e)
-      message: >-
-        Provenance was not produced by a repository owned by the nirmata org (owner id 7470644)
-
+  # ONE validation, ONE verify call — this is not stylistic.
+  #
+  # `extractPayload` can only read an attestation verified *in the same CEL
+  # expression*; verification state does not carry across validations. And
+  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
+  # default) makes a repeat `verifyAttestationSignatures` for the same image a
+  # cache hit that returns the count WITHOUT repopulating the payload store, so
+  # a second call in a second validation yields
+  #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
+  # which under failurePolicy: Fail denies the image.
+  #
+  # So: verify once, then chain every payload assertion off that one call with
+  # `&&`. The cost is a single combined message per policy.
     - expression: >-
         images.containers.map(image,
-          extractPayload(image, attestations.slsa).predicate.buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/")
-        ).all(e, e)
-      message: "Provenance caller workflow is not in the nirmata org"
-
-    - expression: >-
-        images.containers.map(image,
+          verifyAttestationSignatures(image, attestations.slsa, [attestors.github]) > 0 &&
+          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644" &&
+          extractPayload(image, attestations.slsa).predicate.buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/") &&
           extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.runner_environment == "github-hosted"
         ).all(e, e)
-      message: "Provenance was not produced on a GitHub-hosted runner"
+      message: >-
+        SLSA provenance check failed: signature must verify against GitHub's private Sigstore instance, and the predicate must show a nirmata-owned repo (owner id 7470644) calling a nirmata workflow on a GitHub-hosted runner
