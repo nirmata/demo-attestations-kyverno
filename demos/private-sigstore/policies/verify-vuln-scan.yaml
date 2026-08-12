@@ -1,0 +1,71 @@
+# Verify the Trivy vulnerability-scan attestation, and check its CONTENT.
+#
+# This is the payload-checking example: the signature proves the scan came from
+# the central workflow; the second validation reads the scan report itself and
+# denies the image if it found anything CRITICAL.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-vuln-scan
+  annotations:
+    policies.kyverno.io/title: Verify vulnerability scan (no CRITICAL findings)
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/minversion: 1.19.0
+    policies.kyverno.io/description: >-
+      Verifies the Trivy vulnerability-scan attestation and denies the image if
+      the scan reported any CRITICAL severity vulnerability.
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchImageReferences:
+    - glob: "ghcr.io/nirmata/demo-private-attestations*"
+  credentials:
+    secrets:
+      - ghcr-pull-secret
+  variables:
+    - name: githubTrustedRoot
+      expression: >-
+        resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+  attestations:
+    - name: vulnScan
+      intoto:
+        type: "https://nirmata.com/attestations/vulnerability-scan/v1"
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "^https://github\\.com/nirmata/demo-attestations-kyverno/\\.github/workflows/reusable-build-attest\\.yml@refs/(heads/main|tags/v.*)$"
+        trustedRoot:
+          expression: variables.githubTrustedRoot
+        ctlog:
+          insecureIgnoreTlog: true
+          insecureIgnoreSCT: true
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.vulnScan, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify vulnerability-scan attestation"
+
+    # ── Payload check: content, not just signature ──────────────────────────
+    # Trivy's report is the predicate. `Results` may be absent when nothing was
+    # scanned, and a result may carry no `Vulnerabilities` array, so guard both
+    # — otherwise a missing key raises an evaluation error, which under
+    # failurePolicy: Fail denies the image and looks like a real finding.
+    - expression: >-
+        images.containers.map(image,
+          !has(extractPayload(image, attestations.vulnScan).predicate.Results) ||
+          extractPayload(image, attestations.vulnScan).predicate.Results.all(r,
+            !has(r.Vulnerabilities) ||
+            size(r.Vulnerabilities) == 0 ||
+            r.Vulnerabilities.all(v, v.Severity != "CRITICAL"))
+        ).all(e, e)
+      message: "Image has CRITICAL severity vulnerabilities in its scan attestation"

@@ -1,0 +1,43 @@
+# PolicyException: waive the code-review requirement, and nothing else.
+#
+# WHY THIS WORKS THE WAY IT DOES
+#
+# For an ImageValidatingPolicy, a PolicyException is all-or-nothing at the
+# POLICY level. Kyverno's IVP evaluator returns early the moment an exception
+# matches, and the IVP CEL environment exposes no `exceptions` variable — the
+# `exceptions.allowedValues` / `exceptions.allowedImages` escape hatch exists
+# only for ValidatingPolicy, MutatingPolicy and GeneratingPolicy.
+#
+# So you cannot waive one validation inside a policy. Exception granularity
+# equals policy granularity, which is exactly why the attestations here live in
+# five separate policies. This exception names one of them; provenance, SBOM,
+# vulnerability scan and build metadata all stay enforced.
+#
+# Scope it as tightly as the situation allows:
+#   * policyRefs   — only verify-code-review
+#   * images       — only the image that actually needs the waiver
+#   * reportResult — recorded as "skip" in policy reports, so it stays visible
+#
+# There is no expiry knob: policies.kyverno.io/v1 PolicyException has no
+# `expiresAt` field (that belongs to the older kyverno.io/v2 type). Ageing a
+# waiver out has to happen outside the resource — delete it, or gate it in Git.
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: skip-code-review-demo-private
+  namespace: kyverno
+  annotations:
+    # Say why, and who owns it. An undocumented exception is indistinguishable
+    # from a hole someone forgot to close.
+    nirmata.io/justification: >-
+      Demo image is built by a direct push to main, which has zero approving
+      reviews. Waived so the remaining four attestation policies can be
+      demonstrated end to end.
+    nirmata.io/owner: platform-security
+spec:
+  policyRefs:
+    - kind: ImageValidatingPolicy
+      name: verify-code-review
+  images:
+    - "ghcr.io/nirmata/demo-private-attestations*"
+  reportResult: skip

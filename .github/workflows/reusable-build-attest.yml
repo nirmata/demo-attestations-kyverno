@@ -55,6 +55,24 @@ on:
         required: false
         default: true
         type: boolean
+      attest-vuln-scan:
+        description: Run Trivy and attach a vulnerability-scan attestation
+        required: false
+        default: true
+        type: boolean
+      attest-build-metadata:
+        description: Attach a custom build-metadata attestation
+        required: false
+        default: true
+        type: boolean
+      attest-code-review:
+        description: >-
+          Attach a custom code-review attestation carrying the real approval
+          count for the commit's pull request. Direct pushes to main have zero
+          approvals, which is what makes the PolicyException demo meaningful.
+        required: false
+        default: true
+        type: boolean
     outputs:
       image:
         description: Fully qualified image reference that was pushed
@@ -68,6 +86,10 @@ permissions:
   packages: write
   id-token: write
   attestations: write
+  # Needed by the code-review attestation step to look up the commit's PR and
+  # its approving reviews. The CALLER must grant this too — a reusable workflow
+  # can only narrow the caller's token, never widen it.
+  pull-requests: read
 
 jobs:
   build:
@@ -130,4 +152,92 @@ jobs:
           subject-name: ${{ steps.meta.outputs.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      # ── Vulnerability scan ──────────────────────────────────────────────
+      # A custom predicate type, attached with the generic actions/attest.
+      # The Kyverno policy reads the payload and denies on CRITICAL findings,
+      # so this is a content check, not just a signature check.
+      - name: Vulnerability scan (Trivy)
+        if: inputs.attest-vuln-scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: trivy-results.json
+          # Report everything; the policy decides what is fatal.
+          exit-code: "0"
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+
+      - name: Attest vulnerability scan
+        if: inputs.attest-vuln-scan
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://nirmata.com/attestations/vulnerability-scan/v1
+          predicate-path: trivy-results.json
+          push-to-registry: true
+
+      # ── Build metadata (fully custom predicate) ─────────────────────────
+      - name: Collect build metadata
+        if: inputs.attest-build-metadata
+        env:
+          GH_REF: ${{ github.ref }}
+          GH_SHA: ${{ github.sha }}
+          GH_REPO: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_EVENT: ${{ github.event_name }}
+        run: |
+          jq -n \
+            --arg repo "$GH_REPO" --arg ref "$GH_REF" --arg sha "$GH_SHA" \
+            --arg runId "$GH_RUN_ID" --arg event "$GH_EVENT" \
+            '{repository:$repo, ref:$ref, commit:$sha, runId:$runId,
+              eventName:$event, builder:"github-hosted"}' > build-metadata.json
+          cat build-metadata.json
+
+      - name: Attest build metadata
+        if: inputs.attest-build-metadata
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://nirmata.com/attestations/build-metadata/v1
+          predicate-path: build-metadata.json
+          push-to-registry: true
+
+      # ── Code review (custom predicate, REAL approval count) ─────────────
+      # Deliberately reports the true number of approving reviews. A direct
+      # push to main has zero, so the code-review policy denies the image and
+      # the PolicyException demo has something real to waive.
+      - name: Collect code review approvals
+        if: inputs.attest-code-review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          PR=$(gh api "repos/${GH_REPO}/commits/${GH_SHA}/pulls" \
+                 --jq '.[0].number // empty' 2>/dev/null || echo "")
+          if [ -n "$PR" ]; then
+            APPROVALS=$(gh api "repos/${GH_REPO}/pulls/${PR}/reviews" \
+                          --jq '[.[] | select(.state=="APPROVED") | .user.login] | unique | length' \
+                          2>/dev/null || echo 0)
+          else
+            PR=0; APPROVALS=0
+            echo "::notice::No pull request for ${GH_SHA} (direct push) — approvals = 0."
+          fi
+          jq -n --arg sha "$GH_SHA" --argjson pr "$PR" --argjson n "$APPROVALS" \
+            '{commit:$sha, pullRequest:$pr, approvals:$n}' > code-review.json
+          cat code-review.json
+
+      - name: Attest code review
+        if: inputs.attest-code-review
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          predicate-type: https://nirmata.com/attestations/code-review/v1
+          predicate-path: code-review.json
           push-to-registry: true

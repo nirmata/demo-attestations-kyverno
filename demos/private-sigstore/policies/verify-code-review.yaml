@@ -1,0 +1,63 @@
+# Verify the code-review attestation and require 2+ approvals.
+#
+# This is the policy the PolicyException in ../exceptions/ waives. The
+# attestation carries the REAL approval count, so an image built from a direct
+# push to main legitimately fails here — which is what makes the exception demo
+# meaningful rather than theatre.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-code-review
+  annotations:
+    policies.kyverno.io/title: Verify code review (2+ approvals)
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/minversion: 1.19.0
+    policies.kyverno.io/description: >-
+      Verifies the code-review attestation and requires at least two approving
+      reviews on the pull request that produced the image.
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchImageReferences:
+    - glob: "ghcr.io/nirmata/demo-private-attestations*"
+  credentials:
+    secrets:
+      - ghcr-pull-secret
+  variables:
+    - name: githubTrustedRoot
+      expression: >-
+        resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+  attestations:
+    - name: codeReview
+      intoto:
+        type: "https://nirmata.com/attestations/code-review/v1"
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "^https://github\\.com/nirmata/demo-attestations-kyverno/\\.github/workflows/reusable-build-attest\\.yml@refs/(heads/main|tags/v.*)$"
+        trustedRoot:
+          expression: variables.githubTrustedRoot
+        ctlog:
+          insecureIgnoreTlog: true
+          insecureIgnoreSCT: true
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.codeReview, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify code-review attestation"
+
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.codeReview).predicate.approvals >= 2
+        ).all(e, e)
+      message: "Image requires at least 2 approving code reviews"

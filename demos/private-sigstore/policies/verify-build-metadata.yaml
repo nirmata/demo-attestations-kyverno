@@ -1,0 +1,68 @@
+# Verify a fully custom in-toto predicate, and assert its contents.
+#
+# Nothing about this predicate type is standardised — the workflow writes the
+# JSON, this policy reads it back. That is the whole custom-attestation path.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-build-metadata
+  annotations:
+    policies.kyverno.io/title: Verify custom build-metadata attestation
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/minversion: 1.19.0
+    policies.kyverno.io/description: >-
+      Verifies a custom build-metadata predicate and asserts the builder type
+      and originating repository it reports.
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchImageReferences:
+    - glob: "ghcr.io/nirmata/demo-private-attestations*"
+  credentials:
+    secrets:
+      - ghcr-pull-secret
+  variables:
+    - name: githubTrustedRoot
+      expression: >-
+        resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+  attestations:
+    - name: buildMeta
+      intoto:
+        type: "https://nirmata.com/attestations/build-metadata/v1"
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "^https://github\\.com/nirmata/demo-attestations-kyverno/\\.github/workflows/reusable-build-attest\\.yml@refs/(heads/main|tags/v.*)$"
+        trustedRoot:
+          expression: variables.githubTrustedRoot
+        ctlog:
+          insecureIgnoreTlog: true
+          insecureIgnoreSCT: true
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.buildMeta, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify build-metadata attestation"
+
+    # Payload checks on fields this repo defined itself.
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.buildMeta).predicate.builder == "github-hosted"
+        ).all(e, e)
+      message: "Build metadata does not report a GitHub-hosted builder"
+
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.buildMeta).predicate.repository.startsWith("nirmata/")
+        ).all(e, e)
+      message: "Build metadata repository is not in the nirmata org"

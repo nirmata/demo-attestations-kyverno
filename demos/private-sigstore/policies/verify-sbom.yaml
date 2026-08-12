@@ -1,0 +1,51 @@
+# Verify the SPDX SBOM attestation.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-sbom
+  annotations:
+    policies.kyverno.io/title: Verify SPDX SBOM
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/minversion: 1.19.0
+    policies.kyverno.io/description: >-
+      Verifies the SPDX SBOM attestation produced by the central reusable workflow.
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchImageReferences:
+    - glob: "ghcr.io/nirmata/demo-private-attestations*"
+  credentials:
+    secrets:
+      - ghcr-pull-secret
+  variables:
+    - name: githubTrustedRoot
+      expression: >-
+        resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+  attestations:
+    - name: sbom
+      intoto:
+        type: "https://spdx.dev/Document/v2.3"
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "^https://github\\.com/nirmata/demo-attestations-kyverno/\\.github/workflows/reusable-build-attest\\.yml@refs/(heads/main|tags/v.*)$"
+        trustedRoot:
+          expression: variables.githubTrustedRoot
+        ctlog:
+          insecureIgnoreTlog: true
+          insecureIgnoreSCT: true
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.sbom, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify SPDX SBOM attestation against GitHub's private Sigstore instance"
