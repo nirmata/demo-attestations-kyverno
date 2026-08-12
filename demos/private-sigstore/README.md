@@ -139,29 +139,56 @@ Push to `main`, or **Actions → CI (private attestations) → Run workflow**:
 
 - `ghcr.io/nirmata/demo-private-attestations:attested` — provenance **and** SBOM
 - `ghcr.io/nirmata/demo-private-attestations:unattested` — negative test
+  (only if your caller workflow builds it; `bootstrap-private-demo.sh` does)
 
-Confirm the packages are **private** under *Packages → Package settings*, then
-verify locally:
+Confirm the packages are **private** under *Packages → Package settings*.
+
+### ⚠ Use cosign, not `gh attestation verify`, for private-repo images
+
+`gh attestation verify` **fails on these images** with an opaque
+`Error: verifying with issuer "GitHub, Inc."`. The private instance has no
+transparency log, so verification must fall back to the timestamp authority —
+and `gh` exposes no flag to do that (`--custom-trusted-root` does not help).
+This is a CLI limitation, not a problem with the attestation.
+
+Verify with cosign instead. These are the same three decisions the Kyverno
+policy encodes — pinned trusted root, no tlog, signed timestamps:
 
 ```bash
-IMG=oci://ghcr.io/nirmata/demo-private-attestations:attested
-gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno \
-  --predicate-type https://slsa.dev/provenance/v1
-gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno \
-  --predicate-type https://spdx.dev/Document/v2.3
+# GitHub's trusted root only (the JSONL also contains the Public Good root)
+gh attestation trusted-root \
+  | jq -c 'select([.certificateAuthorities[]?.uri] | any(test("githubapp\\.com")))' \
+  > /tmp/gh-root.json
+
+cosign verify-attestation \
+  --new-bundle-format \
+  --trusted-root /tmp/gh-root.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main" \
+  --type slsaprovenance1 \
+  --insecure-ignore-tlog --use-signed-timestamps --insecure-ignore-sct \
+  ghcr.io/nirmata/demo-private-attestations:attested
 ```
 
-Confirm the identity really is the reusable workflow:
+Passing `--certificate-identity` = the **reusable** workflow is itself the proof
+that the SAN is the central workflow: cosign fails the identity check otherwise.
+
+Now confirm signer and caller genuinely diverge:
 
 ```bash
-gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno --format json \
-  | jq -r '.[0].verificationResult.signature.certificate
-           | {san: .subjectAlternativeName, buildSignerURI, buildConfigURI}'
+cosign verify-attestation ... --type slsaprovenance1 [flags above] \
+  ghcr.io/nirmata/demo-private-attestations:attested \
+  | jq -r '.payload' | base64 -d \
+  | jq -r '.predicate.buildDefinition
+           | {caller: .externalParameters.workflow.repository,
+              owner_id: .internalParameters.github.repository_owner_id,
+              runner: .internalParameters.github.runner_environment}'
 ```
 
-`buildSignerURI` (= SAN) should be **reusable-build-attest.yml** and
-`buildConfigURI` the **caller**. If they are equal, the attest steps ran in the
-caller and the org-wide identity story does not hold.
+`caller` should be the **calling** repo while the certificate identity is the
+**central** workflow. If they name the same workflow, the attest steps ran in the
+caller and the org-wide identity story does not hold. Those three fields are
+exactly what the policy's caller-pinning validations assert.
 
 ### 3. Load the trusted root and credentials
 
@@ -190,12 +217,27 @@ kubectl apply -f policies/verify-github-attestations-private.yaml
 kubectl apply -f resources/private-pod.yaml    # admitted
 ```
 
-Negative test:
+Negative test — an image with no attestations:
 
 ```bash
 kubectl run should-fail \
   --image=ghcr.io/nirmata/demo-private-attestations:unattested \
   --restart=Never --overrides='{"spec":{"imagePullSecrets":[{"name":"ghcr-pull-secret"}]}}'
+```
+
+Negative test for the **caller pinning** specifically — this is the one worth
+running, because it proves those validations actually evaluate rather than
+passing vacuously:
+
+```bash
+sed 's|== "7470644"|== "99999999"|; s|name: verify-private-github-attestations|name: neg-wrong-owner|' \
+  policies/verify-github-attestations-private.yaml | kubectl apply -f -
+kubectl delete ivpol verify-private-github-attestations
+sleep 10
+kubectl apply -f resources/private-pod.yaml
+# → denied: "Provenance was not produced by a repository owned by the nirmata org"
+kubectl delete ivpol neg-wrong-owner
+kubectl apply -f policies/verify-github-attestations-private.yaml
 ```
 
 ### 5. Onboard a second repo (the actual payoff)
@@ -238,6 +280,8 @@ pinning is that revocations are invisible until you refresh.
 | `MANIFEST_UNKNOWN` / `401` from Kyverno | `ghcr-pull-secret` missing from the **Kyverno** namespace, or PAT lacks `read:packages`. |
 | `no matching signatures` with the right root | Identity mismatch. Check SAN with `--format json`; if it names the caller, the attest steps are in the wrong workflow. |
 | Caller-pinning validations fail | Image built by a repo outside the org, or on a self-hosted runner. |
+| `failed to evaluate policy: no such key: buildDefinition` | Wrong `extractPayload` path. It returns the **full in-toto Statement**, so predicate fields need `.predicate.` — `extractPayload(...).predicate.buildDefinition...`. (The docs' `extractPayload(...).bomFormat` example is a *referrer* attestation, a different code path.) With `failurePolicy: Fail` a bad path denies everything, looking just like a real violation. |
+| `Error: verifying with issuer "GitHub, Inc."` from `gh` | Expected. `gh attestation verify` cannot verify private-instance attestations — no way to pass the TSA flags. Use the cosign command in step 2. |
 | `trustedRoot` rejected by the API server | Kyverno older than 1.19 — or, commonly, a **stale CRD**: `helm upgrade` does not update CRDs. Check with `kubectl get crd imagevalidatingpolicies.policies.kyverno.io -o json \| grep -c trustedRoot`. |
 | `kyverno apply` reports `Applying 0 policy rule(s)` | The CLI **silently skips** policies it cannot parse, with `error: 0` and exit 0. Re-run with `-v 6` to see the reason. |
 

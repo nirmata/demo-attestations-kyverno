@@ -123,14 +123,14 @@ spec:
     # future "nirmata" account impersonate this one.
     - expression: >-
         images.containers.map(image,
-          extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.repository_owner_id == "7470644"
+          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644"
         ).all(e, e)
       message: >-
         Provenance was not produced by a repository owned by the nirmata org (owner id 7470644)
 
     - expression: >-
         images.containers.map(image,
-          extractPayload(image, attestations.slsa).buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/")
+          extractPayload(image, attestations.slsa).predicate.buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/")
         ).all(e, e)
       message: >-
         Provenance caller workflow is not in the nirmata org
@@ -138,7 +138,7 @@ spec:
     # Reject self-hosted runners, which are easier to subvert than GitHub's.
     - expression: >-
         images.containers.map(image,
-          extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.runner_environment == "github-hosted"
+          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.runner_environment == "github-hosted"
         ).all(e, e)
       message: >-
         Provenance was not produced on a GitHub-hosted runner

@@ -93,6 +93,29 @@ jobs:
       image-tag: attested
       context: .
       attest-sbom: true
+
+  # Same image with NO attestations, so the policy has something to reject.
+  build-unattested:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: \${{ github.actor }}
+          password: \${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/${ORG}/${REPO_NAME}:unattested
+          build-args: |
+            IMAGE_TYPE=unattested
 EOF
 
 cat > "$WORK/README.md" <<EOF

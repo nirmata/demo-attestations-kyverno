@@ -20,10 +20,17 @@ KYVERNO_NS="${2:-kyverno}"
 
 command -v kubectl >/dev/null || { echo "error: 'kubectl' is required" >&2; exit 1; }
 
+# Target a specific cluster with KUBECTL_CONTEXT=<name>. Without it these
+# secrets land in whatever context happens to be current, which is easy to get
+# wrong when your kubeconfig also holds production clusters.
+KCTL=(kubectl)
+[ -n "${KUBECTL_CONTEXT:-}" ] && KCTL=(kubectl --context "$KUBECTL_CONTEXT")
+echo "Target cluster: $("${KCTL[@]}" config current-context 2>/dev/null || echo unknown)"
+
 create_secret() {
   local ns="$1" name="$2"
   echo "==> Creating secret '${name}' in namespace '${ns}'"
-  kubectl create secret docker-registry "$name" \
+  "${KCTL[@]}" create secret docker-registry "$name" \
     --namespace "$ns" \
     --docker-server=ghcr.io \
     --docker-username="$GITHUB_USER" \
