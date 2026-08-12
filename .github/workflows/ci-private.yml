@@ -1,0 +1,86 @@
+# CALLER workflow — what a product repo in the org actually writes.
+#
+# All build/attest logic lives in the central reusable workflow. A product repo
+# supplies inputs and nothing else. Note there are no attest steps here: they
+# must run inside the reusable workflow so the signer identity (Fulcio SAN =
+# job_workflow_ref) resolves to the central workflow, not to this file.
+#
+# GitHub routes attestations to its PRIVATE Sigstore instance only when the
+# repository is private or internal, which requires GitHub Enterprise Cloud.
+# On a public repo the preflight job skips the build with a notice rather than
+# producing public-good attestations the private-Sigstore policy rejects.
+name: CI (private attestations)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "demos/private-sigstore/**"
+      - ".github/workflows/ci-private.yml"
+      - ".github/workflows/reusable-build-attest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check repository visibility
+        id: check
+        run: |
+          if [ "${{ github.event.repository.private }}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Repository is private — attestations will use GitHub's private Sigstore instance."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Repository is public. Attestations here would be signed by the Sigstore Public Good instance, which the private-Sigstore policy intentionally rejects. Skipping. Move this demo to a private/internal repo on GitHub Enterprise Cloud to run it."
+          fi
+
+  # The entire build+attest pipeline, delegated.
+  build:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    uses: ./.github/workflows/reusable-build-attest.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      image-name: demo-private-attestations
+      image-tag: attested
+      context: ./app
+      attest-sbom: true
+
+  # Second image with no attestations, for the policy's negative test.
+  build-unattested:
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: ./app
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/nirmata/demo-private-attestations:unattested
+          build-args: |
+            IMAGE_TYPE=unattested

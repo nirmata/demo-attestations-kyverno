@@ -1,0 +1,15 @@
+# Test pod for the private-image policies.
+# Replace the image reference with your own org/repo before applying.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: private-attestation-demo
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: demo
+      image: ghcr.io/nirmata/demo-private-attestations:attested
+      command: ["sh", "-c", "sleep 30"]
+  imagePullSecrets:
+    - name: ghcr-pull-secret

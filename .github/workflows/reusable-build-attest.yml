@@ -1,0 +1,133 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTRAL REUSABLE WORKFLOW — the heart of this demo.
+#
+# Every product repo in the org calls THIS workflow instead of writing its own
+# build-and-attest steps. That is not just DRY convenience; it is what makes
+# org-wide admission policy tractable:
+#
+#   Sigstore's Fulcio sets the certificate SAN to the OIDC `job_workflow_ref`
+#   claim — the workflow that actually RAN the signing step. When the attest
+#   steps live in a reusable workflow, every calling repo produces attestations
+#   with the SAME signer identity:
+#
+#     https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main
+#
+#   So one Kyverno attestor identity covers the whole org. Without this, each
+#   repo has its own identity and the policy needs an entry per repo — which
+#   is impossible anyway, because the Sigstore bundle verification path accepts
+#   only ONE identity per attestor.
+#
+# ⚠ SECURITY: the signer identity is reusable by anyone who can call this
+#   workflow. Pinning only the SAN proves *which workflow signed*, NOT *which
+#   repo asked it to*. The Kyverno policy therefore ALSO pins the caller from
+#   the provenance predicate. Keep this workflow private/internal, and keep the
+#   caller check in the policy.
+#
+# In production this file belongs in a dedicated repo (e.g. nirmata/shared-workflows)
+# so it versions independently of any product. It lives here to keep the demo
+# in one place; if you move it, update the `subjectRegExp` in the policies.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Reusable — build and attest
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Image name without registry or tag, e.g. demo-private-attestations
+        required: true
+        type: string
+      image-tag:
+        description: Tag to publish
+        required: false
+        default: attested
+        type: string
+      context:
+        description: Docker build context
+        required: false
+        default: .
+        type: string
+      platforms:
+        required: false
+        default: linux/amd64,linux/arm64
+        type: string
+      attest-sbom:
+        description: Also generate and attach an SPDX SBOM attestation
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      image:
+        description: Fully qualified image reference that was pushed
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: Digest of the pushed image
+        value: ${{ jobs.build.outputs.digest }}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Resolve image reference
+        id: meta
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}"
+          IMAGE="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Building $IMAGE:${{ inputs.image-tag }}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: ${{ inputs.context }}
+          push: true
+          platforms: ${{ inputs.platforms }}
+          tags: ${{ steps.meta.outputs.image }}:${{ inputs.image-tag }}
+          build-args: |
+            IMAGE_TYPE=${{ inputs.image-tag }}
+
+      # These attest steps MUST run here, inside the reusable workflow, for the
+      # signer identity (SAN) to be this workflow rather than the caller's.
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a  # v3
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM
+        if: inputs.attest-sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
+        with:
+          image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Create SBOM attestation
+        if: inputs.attest-sbom
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34  # v3
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true

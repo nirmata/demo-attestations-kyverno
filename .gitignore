@@ -10,3 +10,6 @@ cosign.key
 *.swp
 *.swo
 *~
+
+# Generated GitHub Sigstore trusted root
+demos/private-sigstore/trusted-root/

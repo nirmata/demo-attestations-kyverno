@@ -1,0 +1,110 @@
+# ImageValidatingPolicy: verify SLSA provenance + SPDX SBOM from GitHub
+# Artifact Attestations signed by the Sigstore PUBLIC GOOD instance.
+#
+# This is the public-repo counterpart to
+# ../../private-sigstore/policies/verify-github-attestations-private.yaml.
+# The two are deliberately near-identical; the differences are exactly the
+# differences between the two Sigstore instances:
+#
+#   public good (here)                private (GHEC)
+#   ──────────────────────────        ──────────────────────────
+#   trust material from TUF           cosign.trustedRoot (no TUF server)
+#   ctlog.url = rekor.sigstore.dev    insecureIgnoreTlog + TSA verification
+#   image is public                   spec.credentials.secrets for GHCR
+#
+# Everything else — the single reusable-workflow identity and the caller
+# pinning — is shared, which is the point of the central workflow.
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-github-attestations
+  annotations:
+    policies.kyverno.io/title: Verify GitHub provenance and SBOM (public good)
+    policies.kyverno.io/category: Software Supply Chain Security
+    policies.kyverno.io/minversion: 1.17.0
+    policies.kyverno.io/description: >-
+      Enforces both SLSA provenance and an SPDX SBOM from GitHub Artifact
+      Attestations produced by the central reusable workflow.
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  webhookConfiguration:
+    timeoutSeconds: 30
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  matchImageReferences:
+    - glob: "ghcr.io/nirmata/demo-github-attestations-sbom*"
+
+  attestations:
+    - name: slsa
+      intoto:
+        type: "https://slsa.dev/provenance/v1"
+    - name: sbom
+      intoto:
+        type: "https://spdx.dev/Document/v2.3"
+
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          # EXACTLY ONE identity, and it is the CENTRAL REUSABLE WORKFLOW.
+          #
+          # Fulcio sets the certificate SAN from the OIDC `job_workflow_ref`
+          # claim — the workflow that ran the signing step. Every repo in the
+          # org delegates to reusable-build-attest.yml, so they all share this
+          # signer identity and this one policy covers them all.
+          #
+          # It also has to be one entry: the Sigstore bundle verification path
+          # rejects more than one with "unsupported: multiple identities are
+          # not supported at this time", so a two-identity policy never
+          # verifies at all. Cover multiple refs with one anchored regex.
+          identities:
+            - issuer: "https://token.actions.githubusercontent.com"
+              subjectRegExp: "^https://github\\.com/nirmata/demo-attestations-kyverno/\\.github/workflows/reusable-build-attest\\.yml@refs/(heads/main|tags/v.*)$"
+        ctlog:
+          url: "https://rekor.sigstore.dev"
+          # GitHub's attestation bundles do not embed an SCT that cosign can
+          # check here; the Rekor entry is still verified.
+          insecureIgnoreSCT: true
+
+  # Order matters: extractPayload only returns an already-verified payload,
+  # so the signature checks must come first.
+  validations:
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.slsa, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify SLSA provenance attestation"
+    - expression: >-
+        images.containers.map(image, verifyAttestationSignatures(image, attestations.sbom, [attestors.github])).all(e, e > 0)
+      message: "Failed to verify SPDX SBOM attestation"
+
+    # ── Close the "reusable identity" hole ──────────────────────────────────
+    # The attestor proves the CENTRAL WORKFLOW signed this image, NOT which
+    # repo invoked it. Any repo able to call the reusable workflow inherits the
+    # identity — and a workflow in a PUBLIC repo can be called by anyone on
+    # GitHub. Pin the caller from the verified provenance predicate.
+    #
+    # repository_owner_id is immutable (nirmata = 7470644); the org name is not.
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.repository_owner_id == "7470644"
+        ).all(e, e)
+      message: >-
+        Provenance was not produced by a repository owned by the nirmata org (owner id 7470644)
+
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.slsa).buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/")
+        ).all(e, e)
+      message: "Provenance caller workflow is not in the nirmata org"
+
+    - expression: >-
+        images.containers.map(image,
+          extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.runner_environment == "github-hosted"
+        ).all(e, e)
+      message: "Provenance was not produced on a GitHub-hosted runner"

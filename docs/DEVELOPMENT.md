@@ -91,7 +91,7 @@ spec:
             - Pod
       verifyImages:
       - imageReferences:
-        - "ghcr.io/lucchmielowski/kyverno-cosign-testbed:v2-traditional"
+        - "ghcr.io/nirmata/demo-github-attestations-sbom:v2-traditional"
         attestors:
         - entries:
           - keys:
@@ -108,7 +108,7 @@ spec:
             - Pod
       verifyImages:
       - imageReferences:
-        - "ghcr.io/lucchmielowski/kyverno-cosign-testbed:v3-bundle"
+        - "ghcr.io/nirmata/demo-github-attestations-sbom:v3-bundle"
         attestors:
         - entries:
           - keys:
@@ -136,11 +136,11 @@ spec:
             - Pod
       verifyImages:
       - imageReferences:
-        - "ghcr.io/lucchmielowski/kyverno-cosign-testbed:v2-keyless"
+        - "ghcr.io/nirmata/demo-github-attestations-sbom:v2-keyless"
         attestors:
         - entries:
           - keyless:
-              subject: "https://github.com/lucchmielowski/kyverno-cosign-testbed/.github/workflows/ci.yml@refs/heads/main"
+              subject: "https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main"
               issuer: "https://token.actions.githubusercontent.com"
               rekor:
                 url: https://rekor.sigstore.dev
@@ -153,11 +153,11 @@ spec:
             - Pod
       verifyImages:
       - imageReferences:
-        - "ghcr.io/lucchmielowski/kyverno-cosign-testbed:v3-keyless"
+        - "ghcr.io/nirmata/demo-github-attestations-sbom:v3-keyless"
         attestors:
         - entries:
           - keyless:
-              subject: "https://github.com/lucchmielowski/kyverno-cosign-testbed/.github/workflows/ci.yml@refs/heads/main"
+              subject: "https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main"
               issuer: "https://token.actions.githubusercontent.com"
               rekor:
                 url: https://rekor.sigstore.dev
@@ -169,17 +169,17 @@ spec:
 
 ```bash
 # List all tags including .sig images
-crane ls ghcr.io/lucchmielowski/kyverno-cosign-testbed
+crane ls ghcr.io/nirmata/demo-github-attestations-sbom
 
 # Inspect a specific signature manifest
-cosign tree ghcr.io/lucchmielowski/kyverno-cosign-testbed:v3-traditional
+cosign tree ghcr.io/nirmata/demo-github-attestations-sbom:v3-traditional
 ```
 
 ### Check Rekor Transparency Log (for keyless signatures)
 
 ```bash
 # Search for signatures in Rekor
-rekor-cli search --artifact ghcr.io/lucchmielowski/kyverno-cosign-testbed:v2-keyless
+rekor-cli search --artifact ghcr.io/nirmata/demo-github-attestations-sbom:v2-keyless
 
 # View specific Rekor entry
 rekor-cli get --uuid <uuid-from-search>
@@ -190,9 +190,9 @@ rekor-cli get --uuid <uuid-from-search>
 ```bash
 # Verify and show certificate details
 cosign verify \
-  --certificate-identity=https://github.com/lucchmielowski/kyverno-cosign-testbed/.github/workflows/ci.yml@refs/heads/main \
+  --certificate-identity=https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main \
   --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-  ghcr.io/lucchmielowski/kyverno-cosign-testbed:v2-keyless | jq
+  ghcr.io/nirmata/demo-github-attestations-sbom:v2-keyless | jq
 ```
 
 ## Local Testing
@@ -287,7 +287,7 @@ This will delete all versions of the image from GHCR.
 
 ```bash
 # Verification works by tag (recommended)
-cosign verify --key cosign.pub ghcr.io/lucchmielowski/kyverno-cosign-testbed:v3-bundle
+cosign verify --key cosign.pub ghcr.io/nirmata/demo-github-attestations-sbom:v3-bundle
 ```
 
 **Note:** Other images (v2-traditional, v3-traditional, etc.) don't have this issue and are signed by tag successfully.
@@ -331,7 +331,7 @@ cosign verify --key cosign.pub ghcr.io/lucchmielowski/kyverno-cosign-testbed:v3-
 **Solution:**
 - First push should create the package automatically
 - Ensure you have `packages: write` permission
-- Check the package exists at `https://github.com/users/lucchmielowski/packages/container/package/kyverno-cosign-testbed`
+- Check the package exists at `https://github.com/orgs/nirmata/packages/container/package/demo-github-attestations-sbom`
 
 ## CI Workflow Structure
 
@@ -448,7 +448,7 @@ The CI workflow uses the following environment variables:
 
 ```yaml
 env:
-  REGISTRY: "ghcr.io/lucchmielowski"
+  REGISTRY: "ghcr.io/nirmata"
   IMAGE_NAME: "kyverno-cosign-testbed"
 ```
 

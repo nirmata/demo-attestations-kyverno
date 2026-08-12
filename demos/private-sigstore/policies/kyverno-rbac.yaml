@@ -1,0 +1,17 @@
+# Kyverno needs to read the ConfigMap holding GitHub's Sigstore trusted root
+# via the CEL `resource.get(...)` function used in the policies' `variables`.
+#
+# The default Kyverno ClusterRoles do not grant ConfigMap read access, so we
+# aggregate an extra rule into the admission and reports controllers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:read-github-trusted-root
+  labels:
+    rbac.kyverno.io/aggregate-to-admission-controller: "true"
+    rbac.kyverno.io/aggregate-to-reports-controller: "true"
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]

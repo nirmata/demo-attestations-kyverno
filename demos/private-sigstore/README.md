@@ -1,0 +1,250 @@
+# Demo: one central reusable workflow, one org-wide Kyverno policy
+
+**The point of this demo:** a single **central reusable GitHub Actions workflow**
+builds and attests images for every repo in the org, which lets a **single
+Kyverno policy** admit them all — including images in **private GHCR** whose
+attestations come from GitHub's **private Sigstore instance**, verified with the
+`cosign.trustedRoot` field added in **Kyverno 1.19**.
+
+Those two halves are not independent. The reusable workflow is what makes the
+one-policy story possible, for a reason that is easy to miss.
+
+## Why a reusable workflow is load-bearing, not just DRY
+
+Sigstore's Fulcio sets the signing certificate's SAN from the OIDC
+**`job_workflow_ref`** claim — *the workflow that actually ran the signing step*,
+not the workflow that triggered it. So when the attest steps live in a reusable
+workflow, every calling repo produces attestations bearing the **same** signer
+identity:
+
+```
+https://github.com/nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@refs/heads/main
+```
+
+That collapses N repos into 1 policy identity. It is also the only workable
+shape, because of a constraint that took a live cluster to discover:
+
+> Kyverno's Sigstore **bundle** verification path accepts exactly **one**
+> identity per attestor. Two entries fail with
+> `unsupported: multiple identities are not supported at this time` —
+> the policy then never verifies anything, while still passing schema
+> validation and the admission webhook.
+
+Per-repo identities would need one entry per repo. You cannot have them. A
+central workflow gives you one identity that is correct for the whole org.
+
+```
+ repo-a ─┐
+ repo-b ─┼─► reusable-build-attest.yml ─► attestation SAN = reusable workflow ─► 1 Kyverno attestor
+ repo-c ─┘        (runs attest steps)
+```
+
+## ⚠ The trap: a shared identity is shared by everyone
+
+Pinning only the SAN proves **which workflow signed**, not **which repo asked it
+to**. Anyone who can call the reusable workflow inherits the identity. Pin the
+signer alone and a rogue repo's image satisfies your policy.
+
+So the policy also pins the **caller**, read from the verified provenance
+predicate:
+
+```yaml
+- expression: >-
+    images.containers.map(image,
+      extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.repository_owner_id == "7470644"
+    ).all(e, e)
+```
+
+`repository_owner_id` (nirmata = `7470644`) is an **immutable numeric ID**. The
+org *name* is not: rename or transfer it and a new account could claim
+`github.com/nirmata`. The policy checks the ID, the owner URL prefix, and that
+the build ran on a GitHub-hosted runner.
+
+`extractPayload` only returns an already-verified payload, so these checks must
+come **after** the signature validations — the ordering in the policy file is
+deliberate.
+
+## Why private repos need `trustedRoot`
+
+| | Public repo | Private / internal repo |
+|---|---|---|
+| Fulcio CA | `fulcio.sigstore.dev` | `fulcio.githubapp.com` |
+| Trust material | Sigstore TUF repository | **no TUF server** |
+| Transparency log | Rekor | **none** |
+| CT log / SCT | yes | **none** |
+| Freshness proof | Rekor SET | **TSA** (`timestamp.githubapp.com`) |
+| Availability | anyone | GitHub Enterprise Cloud |
+
+A policy trusting the Public Good TUF root cannot verify a private-repo
+attestation — the certificate chains to a CA it has never heard of. Before 1.19
+the only lever was `cosign.tuf`, which assumes the provider runs a TUF server.
+GitHub does not. Kyverno 1.19 adds:
+
+```yaml
+cosign:
+  trustedRoot:
+    expression: variables.githubTrustedRoot   # or an inline `value:`
+```
+
+It takes a sigstore-go `TrustedRoot` document and **takes precedence over
+`tuf`**. This demo keeps the ~26 KB document in a ConfigMap and reads it with
+`resource.get(...)` rather than inlining it.
+
+`insecureIgnoreTlog: true` looks like a downgrade and would be one on a
+public-good image. Here it *enables* the right check: when Kyverno sees a
+Sigstore bundle with the tlog ignored and trust material present, it switches to
+verifying the **signed timestamp** against the TSA in the trusted root. Still
+cryptographically bound to a time — by `timestamp.githubapp.com` rather than Rekor.
+
+## Requirements
+
+- **Kyverno v1.19.0+** (`cosign.trustedRoot`)
+- A **private or internal** repo on **GitHub Enterprise Cloud** (private-repo
+  Artifact Attestations are a GHEC feature)
+- `gh`, `jq`, `kubectl`; cluster egress to `ghcr.io`
+
+## Layout
+
+```
+.github/workflows/
+├── reusable-build-attest.yml   ★ central: builds + attests (owns the identity)
+└── ci-private.yml                caller: inputs only, no attest steps
+
+demos/private-sigstore/
+├── Dockerfile
+├── policies/
+│   ├── kyverno-rbac.yaml                        lets Kyverno read the ConfigMap
+│   └── verify-github-attestations-private.yaml  provenance + SBOM + caller pinning
+├── resources/private-pod.yaml
+├── scripts/
+│   ├── fetch-trusted-root.sh                    trusted root → ConfigMap
+│   └── setup-ghcr-secrets.sh                    GHCR pull secrets
+└── trusted-root/                                generated, gitignored
+```
+
+In production the reusable workflow belongs in its own repo (e.g.
+`nirmata/shared-workflows`) so it versions independently. It lives here to keep
+the demo in one piece — **if you move it, update `subjectRegExp` in the policy.**
+
+## Walkthrough
+
+### 1. Put this in a private repo
+
+Private-Sigstore routing only happens for private/internal GHEC repos. Copy
+`demos/private-sigstore/` and both workflows into one.
+
+### 2. Build and attest
+
+Push to `main`, or **Actions → CI (private attestations) → Run workflow**:
+
+- `ghcr.io/nirmata/demo-private-attestations:attested` — provenance **and** SBOM
+- `ghcr.io/nirmata/demo-private-attestations:unattested` — negative test
+
+Confirm the packages are **private** under *Packages → Package settings*, then
+verify locally:
+
+```bash
+IMG=oci://ghcr.io/nirmata/demo-private-attestations:attested
+gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno \
+  --predicate-type https://slsa.dev/provenance/v1
+gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
+
+Confirm the identity really is the reusable workflow:
+
+```bash
+gh attestation verify "$IMG" -R nirmata/demo-attestations-kyverno --format json \
+  | jq -r '.[0].verificationResult.signature.certificate
+           | {san: .subjectAlternativeName, buildSignerURI, buildConfigURI}'
+```
+
+`buildSignerURI` (= SAN) should be **reusable-build-attest.yml** and
+`buildConfigURI` the **caller**. If they are equal, the attest steps ran in the
+caller and the org-wide identity story does not hold.
+
+### 3. Load the trusted root and credentials
+
+```bash
+./scripts/fetch-trusted-root.sh kyverno
+
+export GITHUB_USER=<your-github-username>
+export GITHUB_TOKEN=<PAT with read:packages>
+./scripts/setup-ghcr-secrets.sh default kyverno
+```
+
+`fetch-trusted-root.sh` picks GitHub's root out of the JSONL that
+`gh attestation trusted-root` emits (it also contains the Public Good root) and
+checks it: `githubapp.com` CAs present, TSAs present, zero Rekor and CT logs.
+
+Both scripts use your **ambient kubectl context** — confirm it with
+`kubectl config current-context` first.
+
+### 4. Apply and test
+
+Values are already `nirmata`, so these run as-is:
+
+```bash
+kubectl apply -f policies/kyverno-rbac.yaml
+kubectl apply -f policies/verify-github-attestations-private.yaml
+kubectl apply -f resources/private-pod.yaml    # admitted
+```
+
+Negative test:
+
+```bash
+kubectl run should-fail \
+  --image=ghcr.io/nirmata/demo-private-attestations:unattested \
+  --restart=Never --overrides='{"spec":{"imagePullSecrets":[{"name":"ghcr-pull-secret"}]}}'
+```
+
+### 5. Onboard a second repo (the actual payoff)
+
+In another private repo in the org, that is the whole pipeline:
+
+```yaml
+jobs:
+  build:
+    uses: nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml@main
+    permissions: {contents: read, packages: write, id-token: write, attestations: write}
+    with:
+      image-name: my-service
+```
+
+Widen the policy's `matchImageReferences` glob to `ghcr.io/nirmata/*`. **No new
+attestor, no new identity, no policy edit per repo** — that is the payoff.
+
+## Trusted root rotation
+
+Pinned roots do not expire, but GitHub rotates key material a few times a year.
+After a rotation, refresh the ConfigMap:
+
+```bash
+./scripts/fetch-trusted-root.sh kyverno
+```
+
+Nothing else changes — the policy reads the ConfigMap per admission request, so
+no restart and no policy edit. Worth running on a schedule. The trade-off of
+pinning is that revocations are invisible until you refresh.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `multiple identities are not supported at this time` | More than one `keyless.identities` entry. Collapse to one anchored regex. |
+| `threshold not met for verified signed timestamps: 0 < 1` | Image was signed by Public Good (no GitHub TSA timestamp) but checked against the GitHub root — i.e. the repo is public. |
+| `parsing inline trustedRoot JSON` | ConfigMap holds JSONL (both roots) instead of the single GitHub root. Re-run `fetch-trusted-root.sh`. |
+| `configmaps "github-trusted-root" is forbidden` | `policies/kyverno-rbac.yaml` not applied. |
+| `MANIFEST_UNKNOWN` / `401` from Kyverno | `ghcr-pull-secret` missing from the **Kyverno** namespace, or PAT lacks `read:packages`. |
+| `no matching signatures` with the right root | Identity mismatch. Check SAN with `--format json`; if it names the caller, the attest steps are in the wrong workflow. |
+| Caller-pinning validations fail | Image built by a repo outside the org, or on a self-hosted runner. |
+| `trustedRoot` rejected by the API server | Kyverno older than 1.19 — or, commonly, a **stale CRD**: `helm upgrade` does not update CRDs. Check with `kubectl get crd imagevalidatingpolicies.policies.kyverno.io -o json \| grep -c trustedRoot`. |
+| `kyverno apply` reports `Applying 0 policy rule(s)` | The CLI **silently skips** policies it cannot parse, with `error: 0` and exit 0. Re-run with `-v 6` to see the reason. |
+
+## Reference
+
+- [Kyverno: ImageValidatingPolicy](https://kyverno.io/docs/policy-types/image-validating-policy/)
+- [Fulcio: OIDC and the `job_workflow_ref` SAN](https://github.com/sigstore/fulcio/blob/main/docs/oidc.md)
+- [Reusable workflow identity is reusable by anyone](https://blog.richardfan.xyz/2024/08/02/reusable-workflow-is-good-until-you-realize-your-identity-is-also-reusable-by-anyone.html)
+- [GitHub: Artifact attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+- [GitHub: Verifying attestations offline](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/verifying-attestations-offline)
