@@ -51,7 +51,7 @@ predicate:
 ```yaml
 - expression: >-
     images.containers.map(image,
-      extractPayload(image, attestations.slsa).buildDefinition.internalParameters.github.repository_owner_id == "7470644"
+      extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644"
     ).all(e, e)
 ```
 
@@ -95,6 +95,31 @@ public-good image. Here it *enables* the right check: when Kyverno sees a
 Sigstore bundle with the tlog ignored and trust material present, it switches to
 verifying the **signed timestamp** against the TSA in the trusted root. Still
 cryptographically bound to a time — by `timestamp.githubapp.com` rather than Rekor.
+
+### Both ignore flags are required, and neither weakens the Fulcio check
+
+Verified by removing each one against a real private image (all three fail):
+
+| Config | Result |
+|---|---|
+| `insecureIgnoreTlog` + `insecureIgnoreSCT` | **admitted** |
+| without `insecureIgnoreTlog` | `failed to verify log inclusion: not enough verified log entries from transparency log: 0 < 1` |
+| without `insecureIgnoreSCT` | `failed to verify signed certificate timestamp: only able to verify 0 SCT entries; unable to meet threshold of 1` |
+| no `ctlog` block at all | fails (both defaults are `false`) |
+
+Structural, not incidental: GitHub's trusted root contains `tlogs: 0` and
+`ctlogs: 0`, so demanding one entry of either can never be satisfied.
+
+These flags skip **only** the transparency log and SCT. The Fulcio certificate
+chain is still fully verified against GitHub's private CA — demonstrated by
+swapping in a hybrid trusted root (GitHub's TSA, public-good Fulcio CA) with the
+same flags:
+
+```
+error: failed to verify leaf certificate: leaf certificate verification failed
+```
+
+If the CA check were being skipped, that would have passed.
 
 ## Requirements
 
@@ -143,16 +168,44 @@ Push to `main`, or **Actions → CI (private attestations) → Run workflow**:
 
 Confirm the packages are **private** under *Packages → Package settings*.
 
-### ⚠ Use cosign, not `gh attestation verify`, for private-repo images
+### Verifying with `gh` — pass `--signer-workflow`
 
-`gh attestation verify` **fails on these images** with an opaque
-`Error: verifying with issuer "GitHub, Inc."`. The private instance has no
-transparency log, so verification must fall back to the timestamp authority —
-and `gh` exposes no flag to do that (`--custom-trusted-root` does not help).
-This is a CLI limitation, not a problem with the attestation.
+```bash
+gh attestation verify oci://ghcr.io/nirmata/demo-private-attestations:attested \
+  -R nirmata/demo-private-attestations \
+  --signer-workflow nirmata/demo-attestations-kyverno/.github/workflows/reusable-build-attest.yml \
+  --predicate-type https://slsa.dev/provenance/v1 --format json \
+  | jq -r '.[0].verificationResult.signature.certificate
+           | {buildSignerURI, buildConfigURI}'
+```
 
-Verify with cosign instead. These are the same three decisions the Kyverno
-policy encodes — pinned trusted root, no tlog, signed timestamps:
+```
+buildSignerURI: .../demo-attestations-kyverno/.../reusable-build-attest.yml@refs/heads/main   ← central
+buildConfigURI: .../demo-private-attestations/.github/workflows/ci.yml@refs/heads/main        ← caller
+```
+
+**`--signer-workflow` is mandatory here, and the reason is the whole point of
+this demo.** By default `gh` expects the signing identity to live in the repo
+given by `-R`. With a central reusable workflow the signer lives in a *different*
+repo, so the default policy rejects it. Without the flag you get:
+
+```
+Error: verifying with issuer "GitHub, Inc."
+```
+
+which is unhelpful because `gh` discards the underlying error
+([`sigstore.go`](https://github.com/cli/cli/blob/trunk/pkg/cmd/attestation/verification/sigstore.go):
+`return nil, fmt.Errorf("verifying with issuer \"%s\"", issuer)`). It is not an
+auth problem and not a private-instance limitation — `gh` fetches the bundles
+from the API with plain `repo` scope and handles GitHub's Sigstore instance fine.
+
+`gh` also has `--signer-repo` and `--deny-self-hosted-runners`, which are its
+built-in equivalents of this policy's caller-pinning validations.
+
+### Verifying with cosign
+
+Useful because the flags map 1:1 onto what the Kyverno policy encodes — pinned
+trusted root, no tlog, signed timestamps:
 
 ```bash
 # GitHub's trusted root only (the JSONL also contains the Public Good root)
@@ -281,7 +334,7 @@ pinning is that revocations are invisible until you refresh.
 | `no matching signatures` with the right root | Identity mismatch. Check SAN with `--format json`; if it names the caller, the attest steps are in the wrong workflow. |
 | Caller-pinning validations fail | Image built by a repo outside the org, or on a self-hosted runner. |
 | `failed to evaluate policy: no such key: buildDefinition` | Wrong `extractPayload` path. It returns the **full in-toto Statement**, so predicate fields need `.predicate.` — `extractPayload(...).predicate.buildDefinition...`. (The docs' `extractPayload(...).bomFormat` example is a *referrer* attestation, a different code path.) With `failurePolicy: Fail` a bad path denies everything, looking just like a real violation. |
-| `Error: verifying with issuer "GitHub, Inc."` from `gh` | Expected. `gh attestation verify` cannot verify private-instance attestations — no way to pass the TSA flags. Use the cosign command in step 2. |
+| `Error: verifying with issuer "GitHub, Inc."` from `gh` | Missing `--signer-workflow`. The signer lives in the central repo, not the `-R` repo, and `gh` swallows the real error. Not an auth or private-instance problem. |
 | `trustedRoot` rejected by the API server | Kyverno older than 1.19 — or, commonly, a **stale CRD**: `helm upgrade` does not update CRDs. Check with `kubectl get crd imagevalidatingpolicies.policies.kyverno.io -o json \| grep -c trustedRoot`. |
 | `kyverno apply` reports `Applying 0 policy rule(s)` | The CLI **silently skips** policies it cannot parse, with `error: 0` and exit 0. Re-run with `-v 6` to see the reason. |
 
