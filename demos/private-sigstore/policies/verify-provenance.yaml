@@ -34,6 +34,12 @@ spec:
     - name: githubTrustedRoot
       expression: >-
         resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+    - name: slsaPayload
+      expression: >-
+        images.containers.map(image,
+          verifyAttestationSignatures(image, attestations.slsa, [attestors.github]) > 0
+            ? extractPayload(image, attestations.slsa)
+            : dyn(null))
   attestations:
     - name: slsa
       intoto:
@@ -54,25 +60,52 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
-  # ONE validation, ONE verify call — this is not stylistic.
+  # WHY THE PAYLOAD IS A VARIABLE — this is not stylistic.
   #
-  # `extractPayload` can only read an attestation verified *in the same CEL
-  # expression*; verification state does not carry across validations. And
-  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
-  # default) makes a repeat `verifyAttestationSignatures` for the same image a
-  # cache hit that returns the count WITHOUT repopulating the payload store, so
-  # a second call in a second validation yields
+  # `extractPayload` can only read an attestation that was verified in the SAME
+  # evaluation. Verification state does not carry from one `validations` entry
+  # to the next, so a bare `extractPayload` in a later validation fails with
   #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
-  # which under failurePolicy: Fail denies the image.
+  # and, under failurePolicy: Fail, denies the image.
   #
-  # So: verify once, then chain every payload assertion off that one call with
-  # `&&`. The cost is a single combined message per policy.
+  # A `variables` entry is one evaluation shared by every validation. Verify and
+  # extract together there, once, and each validation below can then assert one
+  # thing and carry its own message. The alternative — chaining every assertion
+  # off a single `verifyAttestationSignatures(...) > 0 &&` in one expression —
+  # works too but collapses every failure into one message.
+  #
+  # `dyn(null)` is what makes the ternary type-check; a null payload means the
+  # signature did not verify, which the first validation reports. Every later
+  # validation re-checks `p != null` so a signature failure surfaces as that
+  # first clean message rather than as an evaluation error on a null.
     - expression: >-
-        images.containers.map(image,
-          verifyAttestationSignatures(image, attestations.slsa, [attestors.github]) > 0 &&
-          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644" &&
-          extractPayload(image, attestations.slsa).predicate.buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/") &&
-          extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.runner_environment == "github-hosted"
-        ).all(e, e)
+        variables.slsaPayload.all(p, p != null)
+      message: "Failed to verify SLSA provenance attestation against GitHub's private Sigstore instance"
+
+
+    # ── Close the "reusable identity" hole ──────────────────────────────────
+    # The attestor proves the CENTRAL workflow signed this image, not which repo
+    # invoked it. Anyone able to call the reusable workflow inherits the
+    # identity, so pin the caller from the verified predicate.
+    # repository_owner_id is immutable (nirmata = 7470644); the org name is not.
+    - expression: >-
+        variables.slsaPayload.all(p, p != null &&
+          p.predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644"
+        )
       message: >-
-        SLSA provenance check failed: signature must verify against GitHub's private Sigstore instance, and the predicate must show a nirmata-owned repo (owner id 7470644) calling a nirmata workflow on a GitHub-hosted runner
+        Provenance was not produced by a repository owned by the nirmata org (owner id 7470644)
+    - expression: >-
+        variables.slsaPayload.all(p, p != null &&
+          p.predicate.buildDefinition.externalParameters.workflow.repository.startsWith("https://github.com/nirmata/")
+        )
+      message: >-
+        Provenance caller workflow is not in the nirmata org
+
+
+    # Reject self-hosted runners, which are easier to subvert than GitHub's.
+    - expression: >-
+        variables.slsaPayload.all(p, p != null &&
+          p.predicate.buildDefinition.internalParameters.github.runner_environment == "github-hosted"
+        )
+      message: >-
+        Provenance was not produced on a GitHub-hosted runner

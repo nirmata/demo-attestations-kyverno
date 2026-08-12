@@ -33,6 +33,12 @@ spec:
     - name: githubTrustedRoot
       expression: >-
         resource.get("v1", "configmaps", "kyverno", "github-trusted-root").data["trusted_root.json"]
+    - name: buildMetaPayload
+      expression: >-
+        images.containers.map(image,
+          verifyAttestationSignatures(image, attestations.buildMeta, [attestors.github]) > 0
+            ? extractPayload(image, attestations.buildMeta)
+            : dyn(null))
   attestations:
     - name: buildMeta
       intoto:
@@ -50,24 +56,39 @@ spec:
           insecureIgnoreTlog: true
           insecureIgnoreSCT: true
   validations:
-  # ONE validation, ONE verify call — this is not stylistic.
+  # WHY THE PAYLOAD IS A VARIABLE — this is not stylistic.
   #
-  # `extractPayload` can only read an attestation verified *in the same CEL
-  # expression*; verification state does not carry across validations. And
-  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
-  # default) makes a repeat `verifyAttestationSignatures` for the same image a
-  # cache hit that returns the count WITHOUT repopulating the payload store, so
-  # a second call in a second validation yields
+  # `extractPayload` can only read an attestation that was verified in the SAME
+  # evaluation. Verification state does not carry from one `validations` entry
+  # to the next, so a bare `extractPayload` in a later validation fails with
   #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
-  # which under failurePolicy: Fail denies the image.
+  # and, under failurePolicy: Fail, denies the image.
   #
-  # So: verify once, then chain every payload assertion off that one call with
-  # `&&`. The cost is a single combined message per policy.
+  # A `variables` entry is one evaluation shared by every validation. Verify and
+  # extract together there, once, and each validation below can then assert one
+  # thing and carry its own message. The alternative — chaining every assertion
+  # off a single `verifyAttestationSignatures(...) > 0 &&` in one expression —
+  # works too but collapses every failure into one message.
+  #
+  # `dyn(null)` is what makes the ternary type-check; a null payload means the
+  # signature did not verify, which the first validation reports. Every later
+  # validation re-checks `p != null` so a signature failure surfaces as that
+  # first clean message rather than as an evaluation error on a null.
     - expression: >-
-        images.containers.map(image,
-          verifyAttestationSignatures(image, attestations.buildMeta, [attestors.github]) > 0 &&
-          extractPayload(image, attestations.buildMeta).predicate.builder == "github-hosted" &&
-          extractPayload(image, attestations.buildMeta).predicate.repository.startsWith("nirmata/")
-        ).all(e, e)
+        variables.buildMetaPayload.all(p, p != null)
+      message: "Failed to verify build-metadata attestation"
+
+
+    # Payload checks on fields this repo defined itself.
+    - expression: >-
+        variables.buildMetaPayload.all(p, p != null &&
+          p.predicate.builder == "github-hosted"
+        )
       message: >-
-        Build-metadata check failed: signature must verify and the predicate must report a GitHub-hosted builder in the nirmata org
+        Build metadata does not report a GitHub-hosted builder
+    - expression: >-
+        variables.buildMetaPayload.all(p, p != null &&
+          p.predicate.repository.startsWith("nirmata/")
+        )
+      message: >-
+        Build metadata repository is not in the nirmata org

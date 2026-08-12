@@ -49,10 +49,20 @@ So the policy also pins the **caller**, read from the verified provenance
 predicate:
 
 ```yaml
-- expression: >-
-    images.containers.map(image,
-      extractPayload(image, attestations.slsa).predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644"
-    ).all(e, e)
+variables:
+  - name: slsaPayload
+    expression: >-
+      images.containers.map(image,
+        verifyAttestationSignatures(image, attestations.slsa, [attestors.github]) > 0
+          ? extractPayload(image, attestations.slsa)
+          : dyn(null))
+validations:
+  - expression: variables.slsaPayload.all(p, p != null)
+    message: "Failed to verify SLSA provenance attestation"
+  - expression: >-
+      variables.slsaPayload.all(p, p != null &&
+        p.predicate.buildDefinition.internalParameters.github.repository_owner_id == "7470644")
+    message: "Provenance was not produced by a repository owned by the nirmata org"
 ```
 
 `repository_owner_id` (nirmata = `7470644`) is an **immutable numeric ID**. The
@@ -60,9 +70,34 @@ org *name* is not: rename or transfer it and a new account could claim
 `github.com/nirmata`. The policy checks the ID, the owner URL prefix, and that
 the build ran on a GitHub-hosted runner.
 
-`extractPayload` only returns an already-verified payload, so these checks must
-come **after** the signature validations — the ordering in the policy file is
-deliberate.
+### Why the payload is a variable
+
+`extractPayload` can only read an attestation that was verified **in the same
+evaluation**. Verification state does not carry from one `validations` entry to
+the next — so the obvious layout, signature checks first and payload checks
+after, does not work. It fails with:
+
+```
+failed to evaluate policy: failed to get payload: intoto attestation payload
+cannot be fetch before verifying intoto attestation
+```
+
+and under `failurePolicy: Fail` that error denies the image.
+
+A `variables` entry is a single evaluation shared by every validation. Verify
+and extract together there, once, and each validation can then assert one thing
+and carry its own message. Confirmed from the admission log: each attestation is
+verified exactly **once** per request even though four validations read the
+provenance payload.
+
+The alternative — chaining every assertion off one
+`verifyAttestationSignatures(...) > 0 &&` inside a single expression — also
+works, but collapses every distinct failure into one message.
+
+`dyn(null)` is what makes the ternary type-check. A null payload means the
+signature did not verify, which the first validation reports; every later
+validation re-checks `p != null` so a signature failure surfaces as that clean
+message instead of an evaluation error on a null.
 
 ## Why private repos need `trustedRoot`
 
