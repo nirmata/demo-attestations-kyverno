@@ -301,6 +301,7 @@ exactly what the policy's caller-pinning validations assert.
 ### 3. Load the trusted root and credentials
 
 ```bash
+export KUBECTL_CONTEXT=<your-cluster-context>   # optional, see below
 ./scripts/fetch-trusted-root.sh kyverno
 
 export GITHUB_USER=<your-github-username>
@@ -312,8 +313,10 @@ export GITHUB_TOKEN=<PAT with read:packages>
 `gh attestation trusted-root` emits (it also contains the Public Good root) and
 checks it: `githubapp.com` CAs present, TSAs present, zero Rekor and CT logs.
 
-Both scripts use your **ambient kubectl context** — confirm it with
-`kubectl config current-context` first.
+Both scripts target `KUBECTL_CONTEXT` when it is set, and your **current
+kubectl context** otherwise. Each prints `Target cluster:` before writing
+anything. Set it explicitly when your kubeconfig also holds other clusters:
+the pull secret contains your GitHub token.
 
 ### 4. Apply and test
 

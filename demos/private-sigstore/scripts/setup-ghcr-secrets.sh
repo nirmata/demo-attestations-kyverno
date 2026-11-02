@@ -25,7 +25,9 @@ command -v kubectl >/dev/null || { echo "error: 'kubectl' is required" >&2; exit
 # wrong when your kubeconfig also holds production clusters.
 KCTL=(kubectl)
 [ -n "${KUBECTL_CONTEXT:-}" ] && KCTL=(kubectl --context "$KUBECTL_CONTEXT")
-echo "Target cluster: $("${KCTL[@]}" config current-context 2>/dev/null || echo unknown)"
+# "kubectl --context X config current-context" ignores --context, so report the
+# context we were given rather than asking kubectl.
+echo "Target cluster: ${KUBECTL_CONTEXT:-$(kubectl config current-context 2>/dev/null || echo unknown)}"
 
 create_secret() {
   local ns="$1" name="$2"
@@ -35,7 +37,7 @@ create_secret() {
     --docker-server=ghcr.io \
     --docker-username="$GITHUB_USER" \
     --docker-password="$GITHUB_TOKEN" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml | "${KCTL[@]}" apply -f -
 }
 
 create_secret "$KYVERNO_NS"  ghcr-pull-secret

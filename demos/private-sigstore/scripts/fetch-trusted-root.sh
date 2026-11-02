@@ -8,6 +8,9 @@
 # select the GitHub one (certificate authorities under *.githubapp.com).
 #
 # Usage: ./fetch-trusted-root.sh [KYVERNO_NAMESPACE]
+#
+# Target a specific cluster with KUBECTL_CONTEXT=<name>. Without it the
+# ConfigMap lands in whatever context happens to be current.
 set -euo pipefail
 
 NAMESPACE="${1:-kyverno}"
@@ -17,6 +20,10 @@ OUT_FILE="${OUT_DIR}/github-trusted-root.json"
 for cmd in gh jq kubectl; do
   command -v "$cmd" >/dev/null || { echo "error: '$cmd' is required" >&2; exit 1; }
 done
+
+KCTL=(kubectl)
+[ -n "${KUBECTL_CONTEXT:-}" ] && KCTL=(kubectl --context "$KUBECTL_CONTEXT")
+echo "Target cluster: ${KUBECTL_CONTEXT:-$(kubectl config current-context 2>/dev/null || echo unknown)}"
 
 mkdir -p "$OUT_DIR"
 
@@ -50,10 +57,10 @@ jq -r '
 ' "$OUT_FILE"
 
 echo "==> Writing ConfigMap 'github-trusted-root' in namespace '${NAMESPACE}'"
-kubectl create configmap github-trusted-root \
+"${KCTL[@]}" create configmap github-trusted-root \
   --namespace "$NAMESPACE" \
   --from-file=trusted_root.json="$OUT_FILE" \
-  --dry-run=client -o yaml | kubectl apply -f -
+  --dry-run=client -o yaml | "${KCTL[@]}" apply -f -
 
 echo
 echo "Done. Saved to ${OUT_FILE}"
