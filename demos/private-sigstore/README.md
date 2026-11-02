@@ -180,7 +180,7 @@ demos/private-sigstore/
 │   ├── verify-build-metadata.yaml   fully custom predicate
 │   └── verify-code-review.yaml      real approval count, 2+ required
 ├── exceptions/
-│   └── skip-code-review.yaml        waives ONE policy, keeps the other four
+│   └── skip-code-review.yaml        waives ONE policy for ONE image, keeps the other four
 ├── resources/private-pod.yaml
 ├── scripts/
 │   ├── fetch-trusted-root.sh                    trusted root → ConfigMap
@@ -203,7 +203,17 @@ Generating policies). You therefore cannot waive one validation inside a policy.
 **Exception granularity equals policy granularity.** One attestation per policy
 is what makes `exceptions/skip-code-review.yaml` able to waive the code-review
 requirement while provenance, SBOM, vulnerability scan and build metadata stay
-enforced. The public-Sigstore demo keeps a single combined policy on purpose —
+enforced.
+
+**Scope the exception with `matchConditions`, not `spec.images`.** Since
+Kyverno 1.19.1 ([GHSA-5cjf-wwfg-pj4c](https://github.com/kyverno/kyverno/security/advisories/GHSA-5cjf-wwfg-pj4c))
+an IVP exception that sets `spec.images` or `spec.allowedValues` is silently
+ignored: the pod is still denied, with no error or event. (Before the fix it
+waived every image in the pod.) Partial IVP exceptions are tracked in
+[kyverno/kyverno#18292](https://github.com/kyverno/kyverno/issues/18292). The
+expression must also handle every kind the policy autogens to: one that only
+reads `object.spec.containers` errors on Deployments and, with
+`failurePolicy: Fail`, blocks every Deployment in the cluster. The public-Sigstore demo keeps a single combined policy on purpose —
 it is the simpler on-ramp and has no exception to demonstrate.
 
 ## Walkthrough
@@ -339,6 +349,10 @@ Waive that one policy and re-apply:
 kubectl apply -f exceptions/skip-code-review.yaml
 kubectl apply -f resources/private-pod.yaml    # admitted
 ```
+
+The waiver only applies when **every** container is the attested demo image.
+A pod that adds `:unattested` next to it is still denied, and so is an
+unrelated image; other workloads (e.g. an `nginx` Deployment) are unaffected.
 
 ### Two Kyverno flags this demo needs
 
