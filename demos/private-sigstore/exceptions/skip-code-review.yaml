@@ -3,8 +3,8 @@
 # WHY THIS WORKS THE WAY IT DOES
 #
 # For an ImageValidatingPolicy, a PolicyException is all-or-nothing at the
-# POLICY level. Kyverno's IVP evaluator returns early the moment an exception
-# matches, and the IVP CEL environment exposes no `exceptions` variable — the
+# POLICY level. Kyverno's IVP evaluator skips the whole policy when an exception
+# matches, and the IVP CEL environment exposes no `exceptions` variable: the
 # `exceptions.allowedValues` / `exceptions.allowedImages` escape hatch exists
 # only for ValidatingPolicy, MutatingPolicy and GeneratingPolicy.
 #
@@ -13,10 +13,26 @@
 # five separate policies. This exception names one of them; provenance, SBOM,
 # vulnerability scan and build metadata all stay enforced.
 #
+# WHY matchConditions AND NOT spec.images
+#
+# Since Kyverno 1.19.1 (GHSA-5cjf-wwfg-pj4c), an IVP exception that sets
+# `spec.images` or `spec.allowedValues` is IGNORED, silently: no error, no
+# event. Before that fix it waived every image in the pod, including ones never
+# listed. Partial IVP exceptions are tracked in kyverno/kyverno#18292.
+# Until then, scope by image with a CEL matchCondition:
+#   * `.all(...)`: EVERY container must be the waived image. One other image in
+#     the pod makes the condition false, so the waiver does not apply.
+#   * The policy also runs on Deployments, Jobs, CronJobs (autogen), and this
+#     expression is evaluated for them too. Reading only `object.spec.containers`
+#     throws on a Deployment, and with failurePolicy: Fail that blocks EVERY
+#     Deployment in the cluster. So find the pod spec wherever it lives.
+#   * initContainers / ephemeralContainers are not checked here; the other four
+#     policies still verify every image.
+#
 # Scope it as tightly as the situation allows:
-#   * policyRefs   — only verify-code-review
-#   * images       — only the image that actually needs the waiver
-#   * reportResult — recorded as "skip" in policy reports, so it stays visible
+#   * policyRefs      — only verify-code-review
+#   * matchConditions — only the image that actually needs the waiver
+#   * reportResult    — recorded as "skip" in policy reports, so it stays visible
 #
 # There is no expiry knob: policies.kyverno.io/v1 PolicyException has no
 # `expiresAt` field (that belongs to the older kyverno.io/v2 type). Ageing a
@@ -38,6 +54,11 @@ spec:
   policyRefs:
     - kind: ImageValidatingPolicy
       name: verify-code-review
-  images:
-    - "ghcr.io/nirmata/demo-private-attestations*"
+  matchConditions:
+    - name: only-the-demo-image
+      expression: >-
+        (object.kind == "CronJob" ? object.spec.jobTemplate.spec.template.spec
+         : has(object.spec.template) ? object.spec.template.spec
+         : object.spec).containers.all(c,
+           c.image.startsWith("ghcr.io/nirmata/demo-private-attestations:attested"))
   reportResult: skip
