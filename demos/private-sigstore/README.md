@@ -158,7 +158,7 @@ If the CA check were being skipped, that would have passed.
 
 ## Requirements
 
-- **Kyverno v1.19.0+** (`cosign.trustedRoot`)
+- **Kyverno v1.19.0+** (`cosign.trustedRoot`); tested on **v1.19.2** (chart 3.9.2)
 - A **private or internal** repo on **GitHub Enterprise Cloud** (private-repo
   Artifact Attestations are a GHEC feature)
 - `gh`, `jq`, `kubectl`; cluster egress to `ghcr.io`
@@ -340,9 +340,9 @@ kubectl apply -f exceptions/skip-code-review.yaml
 kubectl apply -f resources/private-pod.yaml    # admitted
 ```
 
-### Two Kyverno flags this demo needs
+### Kyverno settings this demo needs
 
-**1. PolicyExceptions must be switched on.** The chart ships them off, and
+**PolicyExceptions must be switched on.** The chart ships them off, and
 `--enablePolicyException=true` alone is not enough — without a namespace the
 controller logs `the flag --exceptionNamespace cannot be empty` at startup and
 exceptions are silently never loaded:
@@ -353,32 +353,21 @@ helm upgrade kyverno kyverno/kyverno -n kyverno --reuse-values \
   --set features.policyExceptions.namespace=kyverno
 ```
 
-**2. The image-verification cache must be off** — `--imageVerifyCacheEnabled=false`.
-
-This is a real bug in the Kyverno `main` build used here, not a preference. The
-cache is keyed by image, so a repeat `verifyAttestationSignatures` for an image
-already verified in this process returns the cached count **without
-repopulating the attestation payload store**. Every `extractPayload` after that
-first verification then fails:
+**The image-verification cache can stay on (Kyverno 1.19.0+).** Pre-release
+`main` builds had a bug where, after a cache hit, every later `extractPayload`
+failed with:
 
 ```
-Policy verify-build-metadata error: failed to evaluate policy: failed to get
-payload: intoto attestation payload cannot be fetch before verifying intoto
-attestation
+failed to get payload: intoto attestation payload cannot be fetch before
+verifying intoto attestation
 ```
 
-It is reproducible and order-dependent: with the cache on, the first admission
-after a controller restart passes and every later one fails, naming whichever
-policy happened to evaluate second. Because `failurePolicy: Fail` turns an
-evaluation error into a denial, this looks exactly like a real policy violation.
-
-```bash
-kubectl -n kyverno set args deploy/kyverno-admission-controller \
-  --imageVerifyCacheEnabled=false   # illustrative; use the chart value
-```
-
-Signature-only policies (`verify-sbom`) are unaffected — this only bites
-policies that read a payload.
+It was fixed in [kyverno/kyverno#17117](https://github.com/kyverno/kyverno/pull/17117)
+and backported to 1.19.0 ([#17195](https://github.com/kyverno/kyverno/pull/17195)).
+On 1.19.2 with the default cache (`imageVerifyCacheEnabled=true`), 12 repeat
+admissions of the attested image all evaluated cleanly. If you still see that
+error you are on a build older than 1.19.0: upgrade, or set
+`--imageVerifyCacheEnabled=false` as a workaround.
 
 ### `polex` does not mean what you think
 
