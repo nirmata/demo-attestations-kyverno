@@ -17,7 +17,10 @@ on:
       - "demos/public-sigstore/**"
       - ".github/workflows/ci-public.yml"
       - ".github/workflows/reusable-build-attest.yml"
-  pull_request:
+  # No pull_request trigger: this workflow PUBLISHES and signs :attested. A PR
+  # run would sign it as ...reusable-build-attest.yml@refs/pull/N/merge, which
+  # the policy's subjectRegExp (main or v* tags) rejects, and would overwrite
+  # the image the public demo uses.
   workflow_dispatch:
 
 permissions:
@@ -25,6 +28,10 @@ permissions:
   packages: write
   id-token: write
   attestations: write
+  # Required by reusable-build-attest.yml (code-review attestation). A called
+  # workflow cannot ask for more than its caller grants; without this the run
+  # fails at startup.
+  pull-requests: read
 
 jobs:
   build:
@@ -34,6 +41,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      pull-requests: read
     with:
       image-name: demo-github-attestations-sbom
       image-tag: attested

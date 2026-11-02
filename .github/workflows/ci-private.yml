@@ -26,6 +26,10 @@ permissions:
   packages: write
   id-token: write
   attestations: write
+  # Required by reusable-build-attest.yml (code-review attestation). A called
+  # workflow cannot ask for more than its caller grants; without this the run
+  # fails at startup.
+  pull-requests: read
 
 jobs:
   preflight:
@@ -54,6 +58,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+      pull-requests: read
     with:
       image-name: demo-private-attestations
       image-tag: attested
