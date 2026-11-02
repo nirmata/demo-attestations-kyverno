@@ -49,13 +49,12 @@ spec:
   # ONE validation, ONE verify call — this is not stylistic.
   #
   # `extractPayload` can only read an attestation verified *in the same CEL
-  # expression*; verification state does not carry across validations. And
-  # Kyverno's image-verification cache (--imageVerifyCacheEnabled, on by
-  # default) makes a repeat `verifyAttestationSignatures` for the same image a
-  # cache hit that returns the count WITHOUT repopulating the payload store, so
-  # a second call in a second validation yields
+  # expression*; verification state does not carry across validations. On
+  # builds before Kyverno 1.19.0, the image-verification cache also made a
+  # repeat `verifyAttestationSignatures` a cache hit that did NOT repopulate the
+  # payload store, so a second call yielded
   #   "intoto attestation payload cannot be fetch before verifying intoto attestation"
-  # which under failurePolicy: Fail denies the image.
+  # (fixed in kyverno/kyverno#17117, backported to 1.19.0).
   #
   # So: verify once, then chain every payload assertion off that one call with
   # `&&`. The cost is a single combined message per policy.
